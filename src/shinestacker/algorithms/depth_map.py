@@ -65,6 +65,11 @@ class DepthMapStack(BaseStackAlgo, TempDirBase):
             'energy_sigma_color', default_params['energy_sigma_color'])
         self.energy_sigma_space = kwargs.get(
             'energy_sigma_space', default_params['energy_sigma_space'])
+        self.energy_gauss_sigma = kwargs.get(
+            'energy_gauss_sigma', default_params['energy_gauss_sigma'])
+        if self.energy_gauss_sigma < 0:
+            raise InvalidOptionError(
+                'energy_gauss_sigma', self.energy_gauss_sigma, "it must not be negative.")
         self.temperature = kwargs.get('temperature', default_params['temperature'])
         self.mode = kwargs.get('mode', default_params['mode'])
         self.memory_limit = kwargs.get('memory_limit', focus_stack_params['memory_limit'])
@@ -203,6 +208,8 @@ class DepthMapStack(BaseStackAlgo, TempDirBase):
             energy_map = self.compute_energy_map(gray)
             if self.energy_smooth_size > 0:
                 energy_map = self.smooth_energy(energy_map)
+            if self.energy_gauss_sigma > 0:
+                energy_map = cv2.GaussianBlur(energy_map, (0, 0), self.energy_gauss_sigma)
             return energy_map
 
         pixels = self.shape[0] * self.shape[1]
