@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 from shinestacker.config.constants import constants
 from shinestacker.config.defaults import DEFAULTS
 from shinestacker.core.exceptions import InvalidOptionError
-from shinestacker.algorithms.utils import read_and_validate_img, img_bw
+from shinestacker.algorithms.utils import read_img, read_and_validate_img, img_bw
 from shinestacker.algorithms.depth_map import DepthMapStack
 
 n_images = 6
@@ -388,6 +388,26 @@ def test_focus_stack_threads_identical(example_images, params):
     assert np.array_equal(results[0], results[1])
 
 
+@pytest.mark.parametrize("path", ["examples/input/img-jpg/0000.jpg",
+                                  "examples/input/img-tif/0000.tif"])
+def test_focus_stack_identical_frames_not_darkened(path):
+    if not os.path.exists(path):
+        pytest.skip(f"Test image {path} not found")
+    source = read_img(path).astype(np.float64)
+    for map_type in (constants.DM_MAP_MAX, constants.DM_MAP_AVERAGE):
+        dms = DepthMapStack(map_type=map_type)
+        dms.process = MagicMock()
+        dms.process.callback.return_value = True
+        dms.print_message = MagicMock()
+        dms.after_step = MagicMock()
+        dms.check_running = MagicMock()
+        dms.init([path] * 3)
+        diff = dms.focus_stack().astype(np.float64) - source
+        assert abs(diff.mean()) < 0.001
+        if map_type == constants.DM_MAP_MAX:
+            assert not diff.any()
+
+
 def test_frames_in_flight_respects_memory_limit():
     dms = DepthMapStack(max_threads=8, memory_limit=1)
     assert dms.frames_in_flight(300 * 1024**2) == 3
@@ -418,3 +438,43 @@ def test_ordered_parallel_map_order_and_early_stop():
         assert next(results) == 0
         results.close()
     assert len(started) <= 5
+
+
+def test_energy_gauss_sigma_default_off_and_validated():
+    assert DepthMapStack().energy_gauss_sigma == 0
+    with pytest.raises(InvalidOptionError):
+        DepthMapStack(energy_gauss_sigma=-1)
+
+
+def test_energy_gauss_sigma_finds_faint_texture(tmp_path):
+    # faint texture in focus in one frame, defocused in the others, all under sensor noise:
+    # the per-pixel energy maximum is mostly noise, its local average is not
+    rng = np.random.default_rng(0)
+    h, w = 256, 256
+    texture = cv2.GaussianBlur(rng.normal(0, 1, (h, w)).astype(np.float32), (0, 0), 2)
+    texture /= texture.std()
+    sharp = 0.6 + 0.003 * texture
+    soft = 0.6 + 0.003 * cv2.GaussianBlur(texture, (0, 0), 4)
+    paths = []
+    for i, base in enumerate([soft, soft, sharp, soft, soft]):
+        img = base + rng.normal(0, 0.006, (h, w)).astype(np.float32)
+        img = np.clip(img * 65535, 0, 65535).astype(np.uint16)
+        paths.append(str(tmp_path / f"frame_{i}.tif"))
+        cv2.imwrite(paths[-1], cv2.merge([img] * 3))
+
+    def band(a):
+        return (cv2.GaussianBlur(a, (0, 0), 1) - cv2.GaussianBlur(a, (0, 0), 4))[16:-16, 16:-16]
+
+    correlation = {}
+    for sigma in (0, 8):
+        dms = DepthMapStack(energy_gauss_sigma=sigma)
+        dms.process = MagicMock()
+        dms.process.callback.return_value = True
+        dms.print_message = MagicMock()
+        dms.after_step = MagicMock()
+        dms.check_running = MagicMock()
+        dms.init(paths)
+        result = dms.focus_stack()[..., 0].astype(np.float32) / 65535
+        correlation[sigma] = np.corrcoef(band(result).ravel(), band(sharp).ravel())[0, 1]
+    assert correlation[8] > correlation[0] + 0.15
+    assert correlation[8] > 0.65
